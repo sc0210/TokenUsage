@@ -2,6 +2,7 @@ import { BudgetReading, currentPeriod, daysLeft, readBudget } from './budget';
 import { formatCost } from './format';
 import { Pricer } from './pricing';
 import { PeriodSpendSource } from './providers/types';
+import { UsageRecord } from './types';
 
 /**
  * How often period spend is recomputed.
@@ -54,6 +55,7 @@ export class BudgetTracker {
   private disposed = false;
   private inFlight = false;
   private reading: BudgetReading | undefined;
+  private records: readonly UsageRecord[] = [];
   private readonly now: () => number;
 
   constructor(private readonly deps: BudgetTrackerDeps) {
@@ -62,6 +64,14 @@ export class BudgetTracker {
 
   get current(): BudgetReading | undefined {
     return this.reading;
+  }
+
+  /**
+   * The records behind the current reading, for the dashboard's daily chart.
+   * Held rather than re-read: the scan behind them is the expensive part.
+   */
+  get periodRecords(): readonly UsageRecord[] {
+    return this.records;
   }
 
   async start(): Promise<void> {
@@ -83,6 +93,7 @@ export class BudgetTracker {
     }
     const { options } = this.deps;
     if (!(options.budgetUSD > 0)) {
+      this.records = [];
       this.publish(undefined);
       return;
     }
@@ -97,6 +108,7 @@ export class BudgetTracker {
       if (this.disposed) {
         return;
       }
+      this.records = records;
       const spent = this.deps.pricer.totalsOf(records).costUSD;
       const reading = readBudget(
         spent,

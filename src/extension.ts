@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { allRecords, lastActivePrompt } from './aggregate';
 import { DEFAULT_THRESHOLDS, normaliseThresholds } from './budget';
 import { BudgetOptions, BudgetTracker } from './budgetTracker';
-import { DetailsPanel } from './details';
+import { DashboardData, DetailsPanel } from './details';
 import {
   excerpt,
   formatCostPrecise,
@@ -44,7 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('tokenUsage.showDetails', () => {
-      DetailsPanel.show(pricer, latestState, tracker?.sessionName);
+      DetailsPanel.show(pricer, dashboardData());
     }),
     vscode.commands.registerCommand('tokenUsage.refresh', async () => {
       await Promise.all([tracker?.rebuild(), budgetTracker?.refresh()]);
@@ -166,7 +166,7 @@ async function restartTracker(): Promise<void> {
   tracker = new SessionTracker(selection.provider, folder.uri.fsPath, (state) => {
     latestState = state;
     statusBar?.render(state);
-    DetailsPanel.updateIfOpen(pricer, state, tracker?.sessionName);
+    DetailsPanel.updateIfOpen(pricer, dashboardData());
   });
   await tracker.start();
   startBudgetTracker(selection.provider);
@@ -195,7 +195,10 @@ function startBudgetTracker(provider: unknown): void {
     sourceLabel: SOURCE_LABELS[activeSource],
     pricer,
     options,
-    onChange: (reading) => statusBar?.updateBudget(reading),
+    onChange: (reading) => {
+      statusBar?.updateBudget(reading);
+      DetailsPanel.updateIfOpen(pricer, dashboardData());
+    },
     store: {
       get: (key) => store?.get<number>(key),
       update: (key, value) => store?.update(key, value),
@@ -227,6 +230,17 @@ function readBudgetOptions(source: ProviderKind): BudgetOptions {
 
 function sourceLabel(): string | undefined {
   return activeSource ? SOURCE_LABELS[activeSource] : undefined;
+}
+
+/** Everything the dashboard draws, gathered from whatever is currently known. */
+function dashboardData(): DashboardData {
+  return {
+    state: latestState,
+    sessionName: tracker?.sessionName,
+    sourceLabel: sourceLabel(),
+    budget: budgetTracker?.current,
+    periodRecords: budgetTracker?.periodRecords,
+  };
 }
 
 function ago(ms: number): string {

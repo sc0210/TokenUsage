@@ -203,6 +203,56 @@ rather than by the size of all history ever recorded. A file that did change is
 re-parsed whole rather than resumed from an offset, because deduplicating by
 `requestId` needs the whole file's ids, and it is only ever the one file.
 
+## The dashboard
+
+Clicking the status bar item opens a panel with the session and the cycle
+charted out. It answers four questions, one chart each:
+
+| Chart | Question |
+|---|---|
+| Spend so far, against an even-pace line | Am I ahead of what this month can afford? |
+| Spend per day | Which days did the money actually go? |
+| Cost per prompt | Which turns were expensive, and is that drifting up? |
+| Context carried, next to output produced | Am I paying to re-send context or to get answers? |
+
+The last pair is the one the extension was built for. Cost per prompt climbs
+through a long session because the context being re-sent grows with it, and
+seeing that curve is what tells you a fresh session would be cheaper than one
+more turn in this one. When the drift is large enough to matter, the panel says
+so in words underneath the chart rather than leaving it to be eyeballed.
+
+### Why the charts are hand-rolled SVG
+
+The panel runs with `enableScripts: false` under `default-src 'none'`. No
+charting library can load, and nothing can be drawn to a canvas. Rather than
+loosen the policy for a dependency, the markup is generated as a string by pure
+functions. Three things fall out of that, all of them good: the geometry is
+asserted in tests by reading the numbers back out of the SVG, colours are VS
+Code's own theme variables so the charts follow the editor, and a chart cannot
+fail to appear because a script did not load.
+
+Hovering any bar, point or reference line gives its exact figures through native
+SVG `<title>`, which needs no scripting.
+
+### Reading them honestly
+
+Small decisions, each one made because the alternative misleads:
+
+- **Axes start at zero.** Truncating one exaggerates the difference between
+  prompts, which is the exact comparison the chart exists to support.
+- **One unit per axis.** `formatTokens` switches unit per value, which is right
+  in a sentence and wrong on an axis — it prints `500` directly below `1.0k`.
+  The axis picks a single unit from its own step instead.
+- **Context and output get separate charts.** Weighted input runs to hundreds of
+  thousands of tokens and output to a couple of thousand; sharing an axis flattens
+  output onto the baseline and says nothing.
+- **Idle days stay as zeros.** Dropping them would compress the gaps and make a
+  week off look like a week of steady spend.
+- **Reference lines are named in the legend, not on the plot.** A caption placed
+  inside the plot area eventually lands on top of a bar.
+- **Prompts that never billed are left out.** They are usually an interrupted
+  message, and a run of zero bars mid-session reads as a bug.
+
 ## Settings
 
 | Setting | Default | |
@@ -256,8 +306,14 @@ npm run test:cursor-api # captured payloads + local state (add --live for the AP
 npm run test:detect     # source auto-detection, incl. the both-agents case
 npm run test:sqlite     # both SQLite backends, compared against each other
 npm run test:budget     # billing-period calendar maths, warnings, period scan
+npm run test:dashboard  # chart geometry, series maths, and the rendered page
 node ./out/test/smoke.js . --watch   # live readout without an editor
 ```
+
+`test:dashboard` also writes `out/dashboard-preview.html`, rendered from this
+machine's real usage with stand-in values for the theme variables. Opening it in
+a browser is the fastest way to look at a layout change without reloading an
+extension host.
 
 The backend comparison needs both backends present, so it skips on a Node older
 than 22. To run it against the runtime the extension actually gets, use Cursor's

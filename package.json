@@ -148,6 +148,7 @@
     "test:cursor-api": "node ./out/test/cursorApi.js",
     "test:sqlite": "node ./out/test/sqlite.js",
     "test:budget": "node ./out/test/budget.js",
+    "test:dashboard": "node ./out/test/dashboard.js",
     "test:detect": "node ./out/test/detect.js"
   },
   "devDependencies": {
