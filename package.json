@@ -2,7 +2,7 @@
   "name": "token-usage",
   "displayName": "Token Usage",
   "description": "Shows AI token usage and cost per prompt in the status bar.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "scdev0210",
   "license": "MIT",
   "engines": {
