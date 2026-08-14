@@ -10,7 +10,7 @@ import {
   queryRows,
   resolveBackend,
 } from './sqlite';
-import { SnapshotProvider } from './types';
+import { PeriodSpendSource, SnapshotProvider } from './types';
 
 /**
  * Cursor's own dashboard endpoint. It reports what was actually charged, which
@@ -27,6 +27,12 @@ const ORIGIN = 'https://cursor.com';
 const LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 const PAGE_SIZE = 200;
+
+/**
+ * Ceiling on pagination, so a runaway or looping endpoint cannot spin forever.
+ * At this page size that is 20,000 events in one billing month.
+ */
+const MAX_PAGES = 100;
 
 /** Spend moves only when a turn completes, so a slow poll is plenty. */
 const DEFAULT_POLL_MS = 60_000;
@@ -333,17 +339,19 @@ async function postJson(
   }
 }
 
-export async function fetchUsageEvents(
+/** One page of events, and whether the window held more than this page. */
+async function fetchUsagePage(
   auth: CursorAuth,
   sinceMs: number,
   nowMs: number,
-): Promise<UsageEvent[]> {
+  page: number,
+): Promise<{ events: UsageEvent[]; full: boolean }> {
   const payload = await postJson(
     USAGE_EVENTS_URL,
     {
       startDate: String(sinceMs),
       endDate: String(nowMs),
-      page: 1,
+      page,
       pageSize: PAGE_SIZE,
     },
     auth,
@@ -351,7 +359,7 @@ export async function fetchUsageEvents(
   const list = (payload as { usageEventsDisplay?: unknown })
     ?.usageEventsDisplay;
   if (!Array.isArray(list)) {
-    return [];
+    return { events: [], full: false };
   }
   const events: UsageEvent[] = [];
   for (const raw of list) {
@@ -360,8 +368,60 @@ export async function fetchUsageEvents(
       events.push(event);
     }
   }
+  // Against the raw page length, not the parsed count: events carrying no usage
+  // are dropped here but still occupied a slot on the page.
+  return { events, full: list.length >= PAGE_SIZE };
+}
+
+export async function fetchUsageEvents(
+  auth: CursorAuth,
+  sinceMs: number,
+  nowMs: number,
+): Promise<UsageEvent[]> {
+  const { events } = await fetchUsagePage(auth, sinceMs, nowMs, 1);
   events.sort((a, b) => a.timestampMs - b.timestampMs);
   return events;
+}
+
+/**
+ * Every event in the window, following pagination.
+ *
+ * A single page is enough to name the current session's turns, but a budget
+ * sums a whole billing month, where stopping at the first page would silently
+ * under-report spend — and under-reporting is the failure that makes a budget
+ * warning worthless.
+ */
+export async function fetchAllUsageEvents(
+  auth: CursorAuth,
+  sinceMs: number,
+  nowMs: number,
+  maxPages = MAX_PAGES,
+): Promise<UsageEvent[]> {
+  const all: UsageEvent[] = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const { events, full } = await fetchUsagePage(auth, sinceMs, nowMs, page);
+    all.push(...events);
+    if (!full) {
+      break;
+    }
+  }
+  all.sort((a, b) => a.timestampMs - b.timestampMs);
+  return all;
+}
+
+/** One billed event, as a record the shared pricing path understands. */
+export function toRecord(event: UsageEvent, index: number): UsageRecord {
+  return {
+    requestId: `${event.conversationId}:${event.timestampMs}:${index}`,
+    timestampMs: event.timestampMs,
+    model: event.model,
+    input: event.input,
+    output: event.output,
+    cacheWrite5m: 0,
+    cacheWrite1h: 0,
+    cacheRead: event.cacheRead,
+    costUSD: event.costUSD,
+  };
 }
 
 /**
@@ -380,21 +440,11 @@ export function buildState(
 ): SessionState {
   const state = createSessionState(sourceName);
   events.forEach((event, index) => {
-    const record: UsageRecord = {
-      // One billed event is one request; the timestamp keys it uniquely.
-      requestId: `${event.conversationId}:${event.timestampMs}:${index}`,
-      timestampMs: event.timestampMs,
-      model: event.model,
-      input: event.input,
-      output: event.output,
-      // The API reports no cache-write figure. Leaving these zero keeps the
-      // token breakdown honest; cost does not depend on them here, because the
-      // charged amount comes from the API rather than from a rate table.
-      cacheWrite5m: 0,
-      cacheWrite1h: 0,
-      cacheRead: event.cacheRead,
-      costUSD: event.costUSD,
-    };
+    // One billed event is one request; the timestamp keys it uniquely. The API
+    // reports no cache-write figure, so those stay zero — which keeps the token
+    // breakdown honest without affecting cost, since the charged amount comes
+    // from the API rather than from a rate table.
+    const record: UsageRecord = toRecord(event, index);
     const promptText = prompts[index];
     if (promptText !== undefined) {
       appendPrompt(state, promptText, event.timestampMs);
@@ -412,13 +462,16 @@ export function buildState(
  * current turn stores zeros. Reading it would report $0.00 for live usage, which
  * is worse than reporting nothing.
  */
-export class CursorApiProvider implements SnapshotProvider {
+export class CursorApiProvider
+  implements SnapshotProvider, PeriodSpendSource
+{
   readonly id = 'cursor';
   readonly pollIntervalMs = DEFAULT_POLL_MS;
 
   constructor(
     private readonly userDir: string = globalStorageDir(),
     private readonly lookbackMs: number = LOOKBACK_MS,
+    private readonly maxPages: number = MAX_PAGES,
   ) {}
 
   async snapshot(workspaceFolderPath: string): Promise<SessionState | null> {
@@ -450,6 +503,26 @@ export class CursorApiProvider implements SnapshotProvider {
 
     const prompts = await promptsFor(this.userDir, active);
     return buildState(active, mine, prompts);
+  }
+
+  /**
+   * Account-wide spend for a window, which is what a budget is measured against.
+   *
+   * Unlike `snapshot` this deliberately does not filter by conversation: spend
+   * from every project counts against the same plan.
+   */
+  async periodRecords(startMs: number, endMs: number): Promise<UsageRecord[]> {
+    const auth = await readAuth(this.userDir);
+    if (!auth) {
+      return [];
+    }
+    const events = await fetchAllUsageEvents(auth, startMs, endMs, this.maxPages);
+    // The endpoint filters by the window it was given, but a boundary event
+    // costing against the wrong month would be invisible and wrong, so the
+    // range is enforced here too.
+    return events
+      .filter((e) => e.timestampMs >= startMs && e.timestampMs < endMs)
+      .map(toRecord);
   }
 
   /**

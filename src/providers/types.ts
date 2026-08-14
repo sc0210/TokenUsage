@@ -1,4 +1,4 @@
-import { SessionState } from '../types';
+import { SessionState, UsageRecord } from '../types';
 
 /**
  * One logical session, which may span several files. Claude Code writes the
@@ -38,6 +38,32 @@ export function isSnapshotProvider(
   provider: UsageProvider | SnapshotProvider,
 ): provider is SnapshotProvider {
   return typeof (provider as SnapshotProvider).snapshot === 'function';
+}
+
+/**
+ * A source that can report what an agent billed over a span of time.
+ *
+ * Deliberately account-wide rather than per-workspace: a budget is a property
+ * of the plan being paid for, so spend from every project has to count against
+ * it. That makes this a different question from the one the session providers
+ * answer, which is why it is a separate capability rather than another field on
+ * `SessionState`.
+ *
+ * Records are returned rather than a total because only the caller holds the
+ * `Pricer`, and pricing has to stay in one place: it is what decides whether a
+ * source's own cost figure or the rate table wins.
+ */
+export interface PeriodSpendSource {
+  periodRecords(startMs: number, endMs: number): Promise<UsageRecord[]>;
+}
+
+export function isPeriodSpendSource(
+  provider: unknown,
+): provider is PeriodSpendSource {
+  return (
+    typeof (provider as PeriodSpendSource | undefined)?.periodRecords ===
+    'function'
+  );
 }
 
 /**

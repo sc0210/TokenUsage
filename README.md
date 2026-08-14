@@ -155,6 +155,54 @@ and re-read every transcript from byte zero. When a workspace has history from
 both, the tooltip names the active source and lists the other with how long ago
 it ran, so its spend never looks like it simply vanished.
 
+## Budgets
+
+Set `tokenUsage.budget.cursorUSD` or `tokenUsage.budget.claudeUSD` and the status
+bar gains a `$31.50 left` segment, turning amber as each threshold passes and red
+once the budget is gone. A budget is followed only for the source currently being
+read, since that is the one on screen.
+
+Two things differ from the session readout, both deliberately:
+
+- **It counts every project on the account, not this workspace.** A budget is a
+  property of the plan being paid for, so spend from everywhere counts against
+  it. The workspace figure answers a different question and stays separate.
+- **It stays visible between sessions.** The session readout hides itself when a
+  folder has no history, because a zero there is noise. "How much have I got left
+  this month" does not stop being interesting when nothing is running.
+
+The cycle is monthly, starting on `tokenUsage.budget.cycleStartDay` in local time.
+A month with no such day uses its last one, so a cycle on the 31st runs to
+28 February and back out again rather than skipping the month.
+
+Warnings fire once per threshold per cycle. What has already been announced is
+stored rather than held in memory, so reloading the window does not re-announce a
+threshold passed days ago, and the highest threshold reached is what is compared —
+a window that was closed when 90% went by still hears about it on the next read.
+
+### What it costs to compute
+
+| Source | How | Cost |
+|---|---|---|
+| Cursor | The billing endpoint, paginated over the cycle | one round trip per page |
+| Claude Code | Every transcript under the projects root | ~600ms cold over 117MB |
+
+Neither is cheap enough to run on the session timer, so period spend refreshes
+every five minutes instead of every ten seconds — a month-to-date figure does not
+meaningfully move in a minute.
+
+Pagination matters for Cursor specifically: the session readout only ever needs
+the first page, but a cycle can exceed it, and stopping early would under-report
+spend. Under-reporting is the one failure that makes a budget warning worthless.
+
+The Claude Code scan is cached per file and invalidated on size and mtime, which
+takes a rescan from 138ms to 3ms on this machine. Transcripts are append-only, so
+a file last written before the cycle began cannot contain anything inside it and
+is skipped without being opened — that keeps the walk bounded by recent activity
+rather than by the size of all history ever recorded. A file that did change is
+re-parsed whole rather than resumed from an offset, because deduplicating by
+`requestId` needs the whole file's ids, and it is only ever the one file.
+
 ## Settings
 
 | Setting | Default | |
@@ -165,6 +213,10 @@ it ran, so its spend never looks like it simply vanished.
 | `tokenUsage.warnThresholdUSD` | `0` | Highlight the item above this spend; 0 disables |
 | `tokenUsage.statusBarPriority` | `100` | Position among status bar items |
 | `tokenUsage.provider` | `auto` | Most recently active source; or pin `claude-code`/`cursor` |
+| `tokenUsage.budget.cursorUSD` | `0` | Monthly Cursor budget; 0 disables |
+| `tokenUsage.budget.claudeUSD` | `0` | Monthly Claude Code budget; 0 disables |
+| `tokenUsage.budget.cycleStartDay` | `1` | Day of month the cycle starts |
+| `tokenUsage.budget.warnAtPercent` | `[75, 90, 100]` | Warn once per cycle at each |
 
 ## Commands
 
@@ -203,6 +255,7 @@ npm run test:fixtures   # invariant checks against your real transcripts
 npm run test:cursor-api # captured payloads + local state (add --live for the API)
 npm run test:detect     # source auto-detection, incl. the both-agents case
 npm run test:sqlite     # both SQLite backends, compared against each other
+npm run test:budget     # billing-period calendar maths, warnings, period scan
 node ./out/test/smoke.js . --watch   # live readout without an editor
 ```
 

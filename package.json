@@ -104,6 +104,38 @@
           "type": "number",
           "default": 100,
           "description": "Status bar item priority. Higher numbers sit further left."
+        },
+        "tokenUsage.budget.cursorUSD": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Monthly budget in USD for Cursor, counting every project on the account. `0` disables budget tracking for Cursor."
+        },
+        "tokenUsage.budget.claudeUSD": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Monthly budget in USD for Claude Code, counting every project on the account. `0` disables budget tracking for Claude Code."
+        },
+        "tokenUsage.budget.cycleStartDay": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 31,
+          "description": "Day of the month the billing cycle starts. Months without that day use their last day."
+        },
+        "tokenUsage.budget.warnAtPercent": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 1
+          },
+          "default": [
+            75,
+            90,
+            100
+          ],
+          "description": "Warn once per cycle as spend passes each of these percentages of the budget."
         }
       }
     }
@@ -115,6 +147,7 @@
     "test:fixtures": "node ./out/test/fixtures.js",
     "test:cursor-api": "node ./out/test/cursorApi.js",
     "test:sqlite": "node ./out/test/sqlite.js",
+    "test:budget": "node ./out/test/budget.js",
     "test:detect": "node ./out/test/detect.js"
   },
   "devDependencies": {

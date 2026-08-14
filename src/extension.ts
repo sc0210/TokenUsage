@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 
 import { allRecords, lastActivePrompt } from './aggregate';
+import { DEFAULT_THRESHOLDS, normaliseThresholds } from './budget';
+import { BudgetOptions, BudgetTracker } from './budgetTracker';
 import { DetailsPanel } from './details';
 import {
   excerpt,
@@ -20,18 +22,22 @@ import {
   selectProvider,
 } from './providers/detect';
 import { describeBackend, resolveBackend } from './providers/sqlite';
+import { isPeriodSpendSource } from './providers/types';
 import { SessionTracker } from './session';
 import { DisplayMode, StatusBar, StatusBarConfig } from './statusBar';
 import { SessionState } from './types';
 
 let statusBar: StatusBar | undefined;
 let tracker: SessionTracker | undefined;
+let budgetTracker: BudgetTracker | undefined;
 let pricer = new Pricer();
 let latestState: SessionState | undefined;
 let activeSource: ProviderKind | undefined;
 let otherSources: SourceActivity[] = [];
+let extensionContext: vscode.ExtensionContext | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  extensionContext = context;
   pricer = buildPricer();
   statusBar = new StatusBar(pricer, readStatusBarConfig());
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });
@@ -41,7 +47,7 @@ export function activate(context: vscode.ExtensionContext): void {
       DetailsPanel.show(pricer, latestState, tracker?.sessionName);
     }),
     vscode.commands.registerCommand('tokenUsage.refresh', async () => {
-      await tracker?.rebuild();
+      await Promise.all([tracker?.rebuild(), budgetTracker?.refresh()]);
     }),
     vscode.commands.registerCommand('tokenUsage.copySessionSummary', async () => {
       const summary = buildSummary(latestState, tracker?.sessionName);
@@ -72,7 +78,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  context.subscriptions.push({ dispose: () => tracker?.dispose() });
+  context.subscriptions.push({
+    dispose: () => {
+      tracker?.dispose();
+      budgetTracker?.dispose();
+    },
+  });
 
   void restartTracker();
 }
@@ -80,6 +91,8 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   tracker?.dispose();
   tracker = undefined;
+  budgetTracker?.dispose();
+  budgetTracker = undefined;
   if (reselectTimer) {
     clearInterval(reselectTimer);
     reselectTimer = undefined;
@@ -121,7 +134,10 @@ let reselectTimer: NodeJS.Timeout | undefined;
 async function restartTracker(): Promise<void> {
   tracker?.dispose();
   tracker = undefined;
+  budgetTracker?.dispose();
+  budgetTracker = undefined;
   latestState = undefined;
+  statusBar?.updateBudget(undefined);
 
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder || folder.uri.scheme !== 'file') {
@@ -153,7 +169,60 @@ async function restartTracker(): Promise<void> {
     DetailsPanel.updateIfOpen(pricer, state, tracker?.sessionName);
   });
   await tracker.start();
+  startBudgetTracker(selection.provider);
   ensureReselectTimer();
+}
+
+/**
+ * Follow the budget for whichever source is active.
+ *
+ * One tracker rather than one per source: the budgets are per plan and the
+ * status bar shows one source at a time, so following the inactive one would
+ * cost a paginated API call every five minutes to display nothing.
+ */
+function startBudgetTracker(provider: unknown): void {
+  if (!activeSource || !isPeriodSpendSource(provider)) {
+    return;
+  }
+  const options = readBudgetOptions(activeSource);
+  if (!(options.budgetUSD > 0)) {
+    return;
+  }
+  const store = extensionContext?.globalState;
+  budgetTracker = new BudgetTracker({
+    source: provider,
+    sourceId: activeSource,
+    sourceLabel: SOURCE_LABELS[activeSource],
+    pricer,
+    options,
+    onChange: (reading) => statusBar?.updateBudget(reading),
+    store: {
+      get: (key) => store?.get<number>(key),
+      update: (key, value) => store?.update(key, value),
+    },
+    warn: (message) => {
+      void vscode.window
+        .showWarningMessage(message, 'Show details')
+        .then((choice) => {
+          if (choice === 'Show details') {
+            void vscode.commands.executeCommand('tokenUsage.showDetails');
+          }
+        });
+    },
+  });
+  void budgetTracker.start();
+}
+
+function readBudgetOptions(source: ProviderKind): BudgetOptions {
+  const c = config();
+  const key = source === 'cursor' ? 'budget.cursorUSD' : 'budget.claudeUSD';
+  return {
+    budgetUSD: c.get<number>(key) ?? 0,
+    cycleStartDay: c.get<number>('budget.cycleStartDay') ?? 1,
+    thresholds: normaliseThresholds(
+      c.get<number[]>('budget.warnAtPercent') ?? DEFAULT_THRESHOLDS,
+    ),
+  };
 }
 
 function sourceLabel(): string | undefined {
@@ -297,6 +366,29 @@ async function showDiagnostics(): Promise<void> {
         error instanceof Error ? error.message : String(error)
       }`,
     );
+  }
+  channel.appendLine('');
+
+  channel.appendLine('Budget');
+  if (!activeSource) {
+    channel.appendLine('  no active source, so no budget is being followed');
+  } else {
+    const options = readBudgetOptions(activeSource);
+    if (!(options.budgetUSD > 0)) {
+      channel.appendLine(`  not set for ${SOURCE_LABELS[activeSource]}`);
+    } else {
+      const reading = budgetTracker?.current;
+      channel.appendLine(`  budget    ${formatCostPrecise(options.budgetUSD)}`);
+      channel.appendLine(`  cycle day ${options.cycleStartDay}`);
+      channel.appendLine(`  warn at   ${options.thresholds.join('%, ')}%`);
+      channel.appendLine(
+        reading
+          ? `  spent     ${formatCostPrecise(reading.spentUSD)} (${formatPercent(
+              reading.fraction,
+            )}) since ${new Date(reading.period.startMs).toLocaleDateString()}`
+          : '  spent     not read yet',
+      );
+    }
   }
   channel.appendLine('');
 

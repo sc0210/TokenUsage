@@ -9,7 +9,7 @@ import {
   appendUnattributedRecord,
 } from '../aggregate';
 import { SessionState, UsageRecord } from '../types';
-import { ResolvedSession, UsageProvider } from './types';
+import { PeriodSpendSource, ResolvedSession, UsageProvider } from './types';
 
 /** Models the transcript writes for locally-generated, non-billable messages. */
 const SYNTHETIC_MODEL = '<synthetic>';
@@ -197,7 +197,115 @@ function buildRecord(entry: Record<string, unknown>): UsageRecord | null {
   };
 }
 
-export class ClaudeCodeProvider implements UsageProvider {
+/** Depth of the walk for period spend: `<project>/<session>/subagents/`. */
+const MAX_WALK_DEPTH = 3;
+
+interface TranscriptFile {
+  path: string;
+  size: number;
+  mtimeMs: number;
+}
+
+/** Every transcript under a root, with the stats the cache is keyed on. */
+async function walkTranscripts(
+  root: string,
+  depth = MAX_WALK_DEPTH,
+): Promise<TranscriptFile[]> {
+  let entries: fs.Dirent[];
+  try {
+    entries = await fsp.readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const found: TranscriptFile[] = [];
+  for (const entry of entries) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      if (depth > 0) {
+        found.push(...(await walkTranscripts(full, depth - 1)));
+      }
+      continue;
+    }
+    if (!entry.name.endsWith('.jsonl')) {
+      continue;
+    }
+    try {
+      const st = await fsp.stat(full);
+      found.push({ path: full, size: st.size, mtimeMs: st.mtimeMs });
+    } catch {
+      // Raced with a delete; skip it.
+    }
+  }
+  return found;
+}
+
+interface CacheEntry {
+  size: number;
+  mtimeMs: number;
+  records: UsageRecord[];
+}
+
+/**
+ * Parsed transcripts, keyed by path and invalidated by size and mtime.
+ *
+ * Module-level rather than per-instance because the provider is rebuilt
+ * whenever the active source is re-selected, and the whole point is to survive
+ * that. Re-reading everything costs about 600ms against 117MB of history on
+ * this machine, which is fine once but not on a timer; with the cache only the
+ * transcript being appended to is re-read.
+ *
+ * A changed file is re-parsed in full rather than resumed from an offset,
+ * because deduplication by `requestId` needs the whole file's ids to be sound,
+ * and it is only ever one file.
+ */
+const transcriptCache = new Map<string, CacheEntry>();
+
+async function parseTranscript(file: TranscriptFile): Promise<UsageRecord[]> {
+  let text: string;
+  try {
+    text = await fsp.readFile(file.path, 'utf8');
+  } catch {
+    return [];
+  }
+  const records: UsageRecord[] = [];
+  const seen = new Set<string>();
+  for (const line of text.split('\n')) {
+    if (line.length === 0 || line[0] !== '{' || !line.includes('"usage"')) {
+      continue;
+    }
+    let entry: Record<string, unknown>;
+    try {
+      entry = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (entry.type !== 'assistant') {
+      continue;
+    }
+    const record = buildRecord(entry);
+    if (record && !seen.has(record.requestId)) {
+      seen.add(record.requestId);
+      records.push(record);
+    }
+  }
+  return records;
+}
+
+async function cachedRecords(file: TranscriptFile): Promise<UsageRecord[]> {
+  const hit = transcriptCache.get(file.path);
+  if (hit && hit.size === file.size && hit.mtimeMs === file.mtimeMs) {
+    return hit.records;
+  }
+  const records = await parseTranscript(file);
+  transcriptCache.set(file.path, {
+    size: file.size,
+    mtimeMs: file.mtimeMs,
+    records,
+  });
+  return records;
+}
+
+export class ClaudeCodeProvider implements UsageProvider, PeriodSpendSource {
   readonly id = 'claude-code';
 
   constructor(private readonly projectsRoot: string) {}
@@ -231,6 +339,47 @@ export class ClaudeCodeProvider implements UsageProvider {
     }
 
     return { id: primary, primary, auxiliary, watchDirs };
+  }
+
+  /**
+   * Account-wide spend for a window, across every project rather than this
+   * workspace, because that is what a budget is charged against.
+   *
+   * Transcripts are append-only, so a file last written before the window began
+   * cannot contain anything inside it. Skipping those keeps the walk bounded by
+   * recent activity instead of by the size of all history ever recorded.
+   */
+  async periodRecords(startMs: number, endMs: number): Promise<UsageRecord[]> {
+    const files = await walkTranscripts(this.projectsRoot);
+    const live = new Set(files.map((f) => f.path));
+    for (const known of transcriptCache.keys()) {
+      if (!live.has(known)) {
+        transcriptCache.delete(known);
+      }
+    }
+
+    const out: UsageRecord[] = [];
+    // Ids are unique per API request, so this also covers the case of the same
+    // request appearing in two files.
+    const seen = new Set<string>();
+    for (const file of files) {
+      if (file.mtimeMs < startMs) {
+        transcriptCache.delete(file.path);
+        continue;
+      }
+      for (const record of await cachedRecords(file)) {
+        if (
+          record.timestampMs >= startMs &&
+          record.timestampMs < endMs &&
+          !seen.has(record.requestId)
+        ) {
+          seen.add(record.requestId);
+          out.push(record);
+        }
+      }
+    }
+    out.sort((a, b) => a.timestampMs - b.timestampMs);
+    return out;
   }
 
   /**
@@ -366,5 +515,7 @@ export const __testing = {
   extractPromptText,
   transcriptsByRecency,
   readRecordedCwd,
+  walkTranscripts,
+  transcriptCache,
   fsExists: (p: string) => fs.existsSync(p),
 };

@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 
 import { allRecords, elapsedMs, lastActivePrompt, promptCount } from './aggregate';
+import { BudgetReading, daysLeft } from './budget';
 import {
   escapeMarkdown,
   excerpt,
+  formatCost,
   formatCostPrecise,
   formatDuration,
   formatInt,
@@ -11,7 +13,11 @@ import {
   formatTokens,
 } from './format';
 import { Pricer, cacheHitRate } from './pricing';
-import { DisplayMode, buildStatusText } from './statusText';
+import {
+  DisplayMode,
+  buildBudgetOnlyText,
+  buildStatusText,
+} from './statusText';
 import { SessionState, Totals } from './types';
 
 export type { DisplayMode };
@@ -32,6 +38,9 @@ export class StatusBar {
   private readonly item: vscode.StatusBarItem;
   private sourceLabel: string | undefined;
   private others: readonly OtherSource[] = [];
+  private budget: BudgetReading | undefined;
+  /** Kept so a budget refresh can repaint without waiting for a session poll. */
+  private state: SessionState | undefined;
 
   constructor(
     private pricer: Pricer,
@@ -57,15 +66,31 @@ export class StatusBar {
   }
 
   render(state: SessionState | undefined): void {
+    this.state = state;
+    this.paint();
+  }
+
+  /** Period spend against the budget, or undefined when none is configured. */
+  updateBudget(reading: BudgetReading | undefined): void {
+    this.budget = reading;
+    this.paint();
+  }
+
+  private paint(): void {
+    const state = this.state;
+    const records = state ? allRecords(state) : [];
     // A workspace Claude Code has never touched is the common case, not an
     // error — say nothing rather than occupying the status bar with a zero.
-    if (!state || state.prompts.length === 0) {
-      this.item.hide();
-      return;
-    }
-
-    const records = allRecords(state);
-    if (records.length === 0) {
+    if (!state || state.prompts.length === 0 || records.length === 0) {
+      if (this.budget) {
+        // A configured budget was asked for explicitly, so it stays visible
+        // between sessions; without one there is nothing worth the space.
+        this.item.text = buildBudgetOnlyText(this.budget);
+        this.item.tooltip = this.buildBudgetOnlyTooltip(this.budget);
+        this.item.backgroundColor = this.background(0);
+        this.item.show();
+        return;
+      }
       this.item.hide();
       return;
     }
@@ -74,14 +99,62 @@ export class StatusBar {
     const last = lastActivePrompt(state);
     const lastTotals = last ? this.pricer.totalsOf(last.records) : undefined;
 
-    this.item.text = buildStatusText(sessionTotals, lastTotals, this.config.display);
+    this.item.text = buildStatusText(
+      sessionTotals,
+      lastTotals,
+      this.config.display,
+      this.budget,
+    );
     this.item.tooltip = this.buildTooltip(state, sessionTotals, lastTotals);
-    this.item.backgroundColor =
-      this.config.warnThresholdUSD > 0 &&
-      sessionTotals.costUSD >= this.config.warnThresholdUSD
-        ? new vscode.ThemeColor('statusBarItem.warningBackground')
-        : undefined;
+    this.item.backgroundColor = this.background(sessionTotals.costUSD);
     this.item.show();
+  }
+
+  /**
+   * Passing the budget outranks the per-session warning: it is the more
+   * expensive fact, and only one colour can be shown.
+   */
+  private background(sessionCostUSD: number): vscode.ThemeColor | undefined {
+    if (this.budget && this.budget.overUSD > 0) {
+      return new vscode.ThemeColor('statusBarItem.errorBackground');
+    }
+    const budgetWarning = (this.budget?.reached ?? 0) > 0;
+    const sessionWarning =
+      this.config.warnThresholdUSD > 0 &&
+      sessionCostUSD >= this.config.warnThresholdUSD;
+    return budgetWarning || sessionWarning
+      ? new vscode.ThemeColor('statusBarItem.warningBackground')
+      : undefined;
+  }
+
+  private appendBudget(md: vscode.MarkdownString, reading: BudgetReading): void {
+    const days = daysLeft(reading.period, Date.now());
+    md.appendMarkdown(
+      `**Budget** — ${formatCost(reading.spentUSD)} of ` +
+        `${formatCost(reading.budgetUSD)} (${formatPercent(reading.fraction)}) · ` +
+        `${days} day${days === 1 ? '' : 's'} left in this cycle\n\n`,
+    );
+    md.appendMarkdown(
+      reading.overUSD > 0
+        ? `⚠️ Over by **${formatCost(reading.overUSD)}**.\n\n`
+        : `**${formatCost(reading.remainingUSD)}** remaining.\n\n`,
+    );
+    md.appendMarkdown(
+      `Counts every project on this account, not just this workspace.\n\n`,
+    );
+  }
+
+  private buildBudgetOnlyTooltip(reading: BudgetReading): vscode.MarkdownString {
+    const md = new vscode.MarkdownString();
+    md.isTrusted = true;
+    md.supportThemeIcons = true;
+    md.appendMarkdown(
+      `**Token Usage**${this.sourceLabel ? ` — ${this.sourceLabel}` : ''}\n\n`,
+    );
+    this.appendBudget(md, reading);
+    md.appendMarkdown('No active session in this workspace.\n\n');
+    md.appendMarkdown(`[Show session details](command:tokenUsage.showDetails)`);
+    return md;
   }
 
   private buildTooltip(
@@ -113,6 +186,10 @@ export class StatusBar {
         .map((o) => `${o.kind} (last active ${formatDuration(Date.now() - o.lastActivityMs)} ago)`)
         .join(', ');
       md.appendMarkdown(`Also used here: ${names}\n\n`);
+    }
+
+    if (this.budget) {
+      this.appendBudget(md, this.budget);
     }
 
     md.appendMarkdown(`| | Tokens | Cost |\n|:--|--:|--:|\n`);
