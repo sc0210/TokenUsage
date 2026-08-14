@@ -1,0 +1,142 @@
+{
+  "name": "token-usage",
+  "displayName": "Token Usage",
+  "description": "Shows AI token usage and cost per prompt in the status bar.",
+  "version": "0.1.0",
+  "publisher": "scdev0210",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "tokenUsage.showDetails",
+        "title": "Token Usage: Show Session Details"
+      },
+      {
+        "command": "tokenUsage.refresh",
+        "title": "Token Usage: Refresh"
+      },
+      {
+        "command": "tokenUsage.copySessionSummary",
+        "title": "Token Usage: Copy Session Summary"
+      },
+      {
+        "command": "tokenUsage.selectSource",
+        "title": "Token Usage: Select Source"
+      },
+      {
+        "command": "tokenUsage.showDiagnostics",
+        "title": "Token Usage: Show Diagnostics"
+      }
+    ],
+    "configuration": {
+      "title": "Token Usage",
+      "properties": {
+        "tokenUsage.provider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "claude-code",
+            "cursor",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Read whichever source was most recently active in this workspace.",
+            "Claude Code transcripts under ~/.claude/projects.",
+            "Cursor spend, read from Cursor's billing API (requires being signed in to Cursor).",
+            "Reserved; reports nothing."
+          ],
+          "default": "auto",
+          "description": "Which usage data source to read. \"auto\" picks the most recently active, since Claude Code often runs inside Cursor's terminal and the host editor does not indicate which agent is spending."
+        },
+        "tokenUsage.claudeProjectsPath": {
+          "type": "string",
+          "default": "~/.claude/projects",
+          "description": "Root directory containing Claude Code transcript folders."
+        },
+        "tokenUsage.customLedgerGlob": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a custom JSONL usage ledger, used when provider is 'custom'."
+        },
+        "tokenUsage.display": {
+          "type": "string",
+          "enum": [
+            "cost-and-tokens",
+            "cost",
+            "tokens"
+          ],
+          "default": "cost-and-tokens",
+          "description": "What to show in the status bar."
+        },
+        "tokenUsage.pricing": {
+          "type": "object",
+          "default": {},
+          "description": "Per-model rate overrides in USD per million tokens, e.g. { \"claude-opus-5\": { \"input\": 5, \"output\": 25 } }.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "number"
+              },
+              "output": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        "tokenUsage.warnThresholdUSD": {
+          "type": "number",
+          "default": 0,
+          "description": "Highlight the status bar item once session cost exceeds this many USD. 0 disables."
+        },
+        "tokenUsage.statusBarPriority": {
+          "type": "number",
+          "default": 100,
+          "description": "Status bar item priority. Higher numbers sit further left."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "test:fixtures": "node ./out/test/fixtures.js",
+    "test:cursor-api": "node ./out/test/cursorApi.js",
+    "test:detect": "node ./out/test/detect.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  },
+  "keywords": [
+    "tokens",
+    "cost",
+    "claude",
+    "claude-code",
+    "cursor",
+    "usage",
+    "ai",
+    "status-bar"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sc0210/TokenUsage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sc0210/TokenUsage/issues"
+  },
+  "homepage": "https://github.com/sc0210/TokenUsage#readme"
+}

@@ -1,0 +1,23 @@
+# Local agent/editor config — never ship these
+.claude/**
+.cursor/**
+.vscode/**
+
+# Agent hook logs. These contain verbatim prompt text and absolute transcript
+# paths from this machine; publishing them would put them on the marketplace.
+logs/**
+
+# Sources and build metadata; only out/ ships
+src/**
+out/test/**
+tsconfig.json
+**/*.map
+**/*.ts
+
+# Repo hygiene
+.git/**
+.gitignore
+node_modules/**
+package-lock.json
+*.vsix
+scratch/**
