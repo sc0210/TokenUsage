@@ -10,6 +10,7 @@ logs/**
 # Sources and build metadata; only out/ ships
 src/**
 out/test/**
+out/dashboard-preview.html
 tsconfig.json
 **/*.map
 **/*.ts
