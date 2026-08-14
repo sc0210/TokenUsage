@@ -1,15 +1,16 @@
-import { execFile } from 'child_process';
-import * as fsSync from 'fs';
 import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
-import { promisify } from 'util';
 
 import { appendPrompt, appendRecord } from '../aggregate';
 import { SessionState, UsageRecord, createSessionState } from '../types';
+import {
+  describeBackend,
+  prefixUpperBound,
+  queryRows,
+  resolveBackend,
+} from './sqlite';
 import { SnapshotProvider } from './types';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Cursor's own dashboard endpoint. It reports what was actually charged, which
@@ -52,38 +53,6 @@ function globalStorageDir(): string {
   return path.join(os.homedir(), '.config', 'Cursor', 'User');
 }
 
-/**
- * Query Cursor's SQLite state through the `sqlite3` CLI.
- *
- * The extension ships no native modules and `node:sqlite` needs Node 22, which
- * is newer than the runtime some Cursor builds embed. Read-only mode matters:
- * the database is open in another process while we read it.
- */
-let sqliteBinary: string | undefined;
-
-/**
- * A GUI-launched editor inherits a minimal PATH, not a login shell's. The
- * absolute path is tried first so the lookup does not depend on how the app was
- * started; a bare name is the fallback for platforms that put it elsewhere.
- */
-function sqlitePath(): string {
-  if (sqliteBinary === undefined) {
-    sqliteBinary = fsSync.existsSync('/usr/bin/sqlite3')
-      ? '/usr/bin/sqlite3'
-      : 'sqlite3';
-  }
-  return sqliteBinary;
-}
-
-async function querySqlite(dbPath: string, sql: string): Promise<string> {
-  const { stdout } = await execFileAsync(
-    sqlitePath(),
-    [`file:${dbPath}?mode=ro`, sql],
-    { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 },
-  );
-  return stdout;
-}
-
 function sqlQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
@@ -103,12 +72,11 @@ export async function readAuth(userDir: string): Promise<CursorAuth | null> {
   }
   let token: string;
   try {
-    token = (
-      await querySqlite(
-        db,
-        "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';",
-      )
-    ).trim();
+    const rows = await queryRows(
+      db,
+      "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';",
+    );
+    token = (rows[0]?.[0] ?? '').trim();
   } catch {
     return null;
   }
@@ -204,14 +172,16 @@ export async function lastActivityMs(
   }
   const db = path.join(userDir, 'globalStorage', 'state.vscdb');
   try {
-    const out = await querySqlite(
+    const rows = await queryRows(
       db,
       `SELECT MAX(COALESCE(lastUpdatedAt, createdAt)) FROM composerHeaders ` +
         `WHERE json_extract(value,'$.workspaceIdentifier.id')=${sqlQuote(
           workspaceId,
         )};`,
     );
-    const parsed = Number(out.trim());
+    // No matching conversation yields either no row or a NULL one, depending on
+    // the backend; both read as 0, meaning "never".
+    const parsed = Number((rows[0]?.[0] ?? '').trim());
     return Number.isFinite(parsed) ? parsed : 0;
   } catch {
     return 0;
@@ -229,14 +199,16 @@ export async function conversationIdsFor(
 
   const db = path.join(userDir, 'globalStorage', 'state.vscdb');
   try {
-    const out = await querySqlite(
+    const rows = await queryRows(
       db,
       `SELECT composerId FROM composerHeaders ` +
         `WHERE json_extract(value,'$.workspaceIdentifier.id')=${sqlQuote(
           workspaceId,
         )} ORDER BY COALESCE(lastUpdatedAt, createdAt) DESC;`,
     );
-    return out.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+    return rows
+      .map((row) => (row[0] ?? '').trim())
+      .filter((id) => id.length > 0);
   } catch {
     return [];
   }
@@ -248,15 +220,21 @@ export async function promptsFor(
   conversationId: string,
 ): Promise<string[]> {
   const db = path.join(userDir, 'globalStorage', 'state.vscdb');
+  // A prefix range rather than a LIKE, so this seeks the key index instead of
+  // scanning every bubble Cursor has ever stored. Newlines are flattened in SQL
+  // because the CLI backend delimits rows with them.
+  const prefix = `bubbleId:${conversationId}:`;
   try {
-    const out = await querySqlite(
+    const rows = await queryRows(
       db,
       `SELECT replace(replace(COALESCE(json_extract(value,'$.text'),''),char(10),' '),char(13),' ') ` +
-        `FROM cursorDiskKV WHERE key LIKE ${sqlQuote(
-          `bubbleId:${conversationId}:%`,
+        `FROM cursorDiskKV WHERE key >= ${sqlQuote(prefix)} AND key < ${sqlQuote(
+          prefixUpperBound(prefix),
         )} AND json_extract(value,'$.type')=1 ORDER BY rowid;`,
     );
-    return out.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+    return rows
+      .map((row) => (row[0] ?? '').trim())
+      .filter((text) => text.length > 0);
   } catch {
     return [];
   }
@@ -481,14 +459,12 @@ export class CursorApiProvider implements SnapshotProvider {
    * without this there is no way to tell "not signed in" from "no spend yet".
    */
   async diagnose(workspaceFolderPath: string): Promise<string> {
-    let sqliteOk = true;
-    try {
-      await execFileAsync(sqlitePath(), ['-version'], { timeout: 5_000 });
-    } catch {
-      sqliteOk = false;
-    }
-    if (!sqliteOk) {
-      return `\`${sqlitePath()}\` is not runnable, so Cursor's local state cannot be read.`;
+    const backend = await resolveBackend();
+    if (!backend) {
+      return (
+        'no SQLite is available — this host has neither a built-in `node:sqlite` ' +
+        'nor a `sqlite3` on PATH, so Cursor\'s local state cannot be read.'
+      );
     }
 
     const auth = await readAuth(this.userDir);
@@ -534,7 +510,10 @@ export class CursorApiProvider implements SnapshotProvider {
         `to this folder's newest conversation (${conversationIds[0]}).`
       );
     }
-    return `${mine.length} billed event(s) found for this folder.`;
+    return (
+      `${mine.length} billed event(s) found for this folder ` +
+      `(local state read through ${describeBackend(backend)}).`
+    );
   }
 }
 

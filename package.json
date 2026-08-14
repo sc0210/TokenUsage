@@ -114,6 +114,7 @@
     "vscode:prepublish": "npm run compile",
     "test:fixtures": "node ./out/test/fixtures.js",
     "test:cursor-api": "node ./out/test/cursorApi.js",
+    "test:sqlite": "node ./out/test/sqlite.js",
     "test:detect": "node ./out/test/detect.js"
   },
   "devDependencies": {

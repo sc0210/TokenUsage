@@ -92,8 +92,36 @@ mode `pricing.ts` exists to avoid.
    not affect cost, which comes from the API rather than from cache multipliers.
 
 This provider is polled, not tailed — there is no byte offset to resume from, so
-it re-reads the window every 60s. Reading Cursor's SQLite uses the `sqlite3`
-CLI, since the extension ships no native modules and `node:sqlite` needs Node 22.
+it re-reads the window every 60s.
+
+### Reading Cursor's SQLite
+
+Two backends, tried in that order, because no single one covers every host:
+
+| Backend | Available where |
+|---|---|
+| `node:sqlite` | Node 22+; Cursor 3.15 embeds Node 24 |
+| `sqlite3` CLI | macOS and most Linux images ship it; **Windows does not** |
+
+The built-in module is preferred, and matters most on Windows: nothing there
+provides a `sqlite3` on `PATH`, so a CLI-only reader reports nothing at all on
+that platform while looking identical to "no usage yet". The extension still
+ships no native modules and downloads nothing — `node:sqlite` is part of the
+runtime Cursor already embeds. Where it is missing the CLI is used instead, and
+`Show Diagnostics` names the backend in play.
+
+Both backends must return identical rows, so `test:sqlite` runs the same queries
+through each and compares them; a divergence would otherwise surface on one
+platform only. Two details make that hold: Cursor declares both key-value tables
+as `BLOB` and stores JSON text in them, so the built-in backend's bytes are
+decoded to text, and the CLI's row-per-line output means any column that can
+contain a newline is flattened in SQL.
+
+Bubbles are read with a **prefix range** (`key >= p AND key < p′`) rather than
+`LIKE 'p%'`. `LIKE` is case-insensitive by default, so SQLite cannot use the key
+index behind it and scans the whole table: on a real 958 MB `state.vscdb` that
+is 767 ms per read against 5 ms for the range scan. That gap is what makes the
+synchronous built-in backend safe to call at all.
 
 ## Choosing a source
 
@@ -174,5 +202,15 @@ npm run compile
 npm run test:fixtures   # invariant checks against your real transcripts
 npm run test:cursor-api # captured payloads + local state (add --live for the API)
 npm run test:detect     # source auto-detection, incl. the both-agents case
+npm run test:sqlite     # both SQLite backends, compared against each other
 node ./out/test/smoke.js . --watch   # live readout without an editor
+```
+
+The backend comparison needs both backends present, so it skips on a Node older
+than 22. To run it against the runtime the extension actually gets, use Cursor's
+own embedded Node rather than whatever `node` resolves to:
+
+```sh
+ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor \
+  ./out/test/sqlite.js
 ```

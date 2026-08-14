@@ -19,6 +19,7 @@ import {
   detectSources,
   selectProvider,
 } from './providers/detect';
+import { describeBackend, resolveBackend } from './providers/sqlite';
 import { SessionTracker } from './session';
 import { DisplayMode, StatusBar, StatusBarConfig } from './statusBar';
 import { SessionState } from './types';
@@ -259,6 +260,10 @@ async function showDiagnostics(): Promise<void> {
   channel.appendLine(`workspace       ${folder?.uri.fsPath ?? '(none open)'}`);
   channel.appendLine(`provider setting ${config().get<string>('provider') ?? 'auto'}`);
   channel.appendLine(`active source   ${sourceLabel() ?? '(none)'}`);
+  const backend = await resolveBackend();
+  channel.appendLine(
+    `sqlite backend  ${backend ? describeBackend(backend) : '(none available)'}`,
+  );
   channel.appendLine('');
 
   if (!folder || folder.uri.scheme !== 'file') {
